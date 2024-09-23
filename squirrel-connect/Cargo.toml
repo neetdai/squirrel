@@ -1,0 +1,16 @@
+[package]
+name = "squirrel-connect"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = {version = "0.1.40", default-feature = false, features = ["async-await", "std", "attributes"]}
+sqlx = {version = "0.8.2", default-feature = false}
+
+
+[features]
+default = [
+]
+mysql = ["sqlx/mysql"]
+postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]
