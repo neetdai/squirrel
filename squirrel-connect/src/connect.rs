@@ -2,19 +2,23 @@ use std::time::Duration;
 use std::str::FromStr;
 
 use sqlx::{
-    pool::{Pool, PoolOptions},
-    Error as SqlxError,
+    pool::{Pool, PoolOptions}, Connection, Database, Error as SqlxError
 };
-use tracing::log::LevelFilter;
+use tracing::{
+    log::LevelFilter,
+    event,
+    span,
+    Level,
+};
 
 #[cfg(feature = "mysql")]
 use sqlx::mysql::{MySql, MySqlConnectOptions};
 
 #[cfg(feature = "postgres")]
-use sqlx::postgres::{Postgres, PostgresConnectionOptions};
+use sqlx::postgres::{Postgres, PgConnectOptions};
 
 #[cfg(feature = "sqlite")]
-use sqlx::sqlite::{Sqlite, SqliteConnectionOptions};
+use sqlx::sqlite::{Sqlite, SqliteConnectOptions};
 
 #[derive(Debug, Clone)]
 pub(crate) enum ConnectionOptions {
@@ -22,10 +26,10 @@ pub(crate) enum ConnectionOptions {
     MySql(MySqlConnectOptions),
 
     #[cfg(feature = "postgres")]
-    Postgres(PostgresConnectionOptions),
+    Postgres(PgConnectOptions),
 
     #[cfg(feature = "sqlite")]
-    Sqlite(SqliteConnectionOptions),
+    Sqlite(SqliteConnectOptions),
 }
 
 impl ConnectionOptions {
@@ -40,14 +44,14 @@ impl ConnectionOptions {
         #[cfg(feature = "postgres")]
         if url.starts_with("postgres://") {
             return Ok(ConnectionOptions::Postgres(
-                PostgresConnectionOptions::from_str(url)?,
+                PgConnectOptions::from_str(url)?,
             ));
         }
 
         #[cfg(feature = "sqlite")]
         if url.starts_with("sqlite://") {
             return Ok(ConnectionOptions::Sqlite(
-                SqliteConnectionOptions::from_str(url)?,
+                SqliteConnectOptions::from_str(url)?,
             ));
         }
 
@@ -130,11 +134,16 @@ impl DataBase {
                     .acquire_timeout(options.acquire_timeout)
                     .acquire_slow_level(options.acquire_slow_level)
                     .acquire_slow_threshold(options.acquire_slow_threshold)
+                    .after_connect(|connection, meta| Box::pin(async move {
+                        event!(Level::INFO, "MySql after connect");
+
+                        Ok(())
+                    }))
                     .connect_lazy_with(mysql_options.clone());
                 Ok(DataBase::MySql(pool))
             }
             #[cfg(feature = "postgres")]
-            ConnectionOptions::Postgres(postgres_options) => {
+            ConnectionOptions::Postgres(ref postgres_options) => {
                 let mut pool_options = PoolOptions::<Postgres>::new();
                 let pool = pool_options
                     .max_connections(options.max_connections)
@@ -142,11 +151,16 @@ impl DataBase {
                     .acquire_timeout(options.acquire_timeout)
                     .acquire_slow_level(options.acquire_slow_level)
                     .acquire_slow_threshold(options.acquire_slow_threshold)
-                    .connect_lazy_with(postgres_options);
+                    .after_connect(|connection, meta| Box::pin(async move {
+                        event!(Level::INFO, "Postgres after connect");
+
+                        Ok(())
+                    }))
+                    .connect_lazy_with(postgres_options.clone());
                 Ok(DataBase::Postgres(pool))
             }
             #[cfg(feature = "sqlite")]
-            ConnectionOptions::Sqlite(sqlite_options) => {
+            ConnectionOptions::Sqlite(ref sqlite_options) => {
                 let mut pool_options = PoolOptions::<Sqlite>::new();
                 let pool = pool_options
                     .max_connections(options.max_connections)
@@ -154,7 +168,12 @@ impl DataBase {
                     .acquire_timeout(options.acquire_timeout)
                     .acquire_slow_level(options.acquire_slow_level)
                     .acquire_slow_threshold(options.acquire_slow_threshold)
-                    .connect_lazy_with(sqlite_options);
+                    .after_connect(|connection, meta| Box::pin(async move {
+                        event!(Level::INFO, "Sqlite after connect");
+
+                        Ok(())
+                    }))
+                    .connect_lazy_with(sqlite_options.clone());
                 Ok(DataBase::Sqlite(pool))
             }
         }

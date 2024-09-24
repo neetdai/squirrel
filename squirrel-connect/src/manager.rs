@@ -1,8 +1,11 @@
 use std::collections::VecDeque;
 
-use sqlx::pool::{Pool, PoolOptions};
+use sqlx::{
+    pool::{Pool, PoolOptions},
+    Error as SqlxError,
+};
 
-use crate::connect::DataBase;
+use crate::{connect::DataBase, Options};
 
 #[derive(Debug)]
 pub struct Manager {
@@ -10,4 +13,18 @@ pub struct Manager {
     slaves: VecDeque<DataBase>,
 }
 
-impl Manager {}
+impl Manager {
+    pub fn new() -> Self {
+        Self {
+            master: VecDeque::new(),
+            slaves: VecDeque::new(),
+        }
+    }
+
+    pub fn add_master(&mut self, options: &Options) -> Result<(), SqlxError> {
+        let database = DataBase::connect(options)?;
+        self.master.push_back(database);
+
+        Ok(())
+    }
+}
