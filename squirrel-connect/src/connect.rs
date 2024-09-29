@@ -1,21 +1,21 @@
-use std::time::Duration;
-use std::str::FromStr;
+use std::ops::DerefMut;
+use std::{ops::Deref, time::Duration};
 
+use crate::utils::{Ext, Status};
+use sqlx::any::{install_default_drivers, Any, AnyConnectOptions};
 use sqlx::{
-    pool::{Pool, PoolOptions}, Connection, Database, Error as SqlxError
+    pool::{Pool, PoolOptions},
+    query, Connection, Database, Error as SqlxError,
 };
-use tracing::{
-    log::LevelFilter,
-    event,
-    span,
-    Level,
-};
+use sqlx::{ConnectOptions, Execute};
+use tracing::{event, log::LevelFilter, span, Level};
+use url::{ParseError, Url};
 
 #[cfg(feature = "mysql")]
 use sqlx::mysql::{MySql, MySqlConnectOptions};
 
 #[cfg(feature = "postgres")]
-use sqlx::postgres::{Postgres, PgConnectOptions};
+use sqlx::postgres::{PgConnectOptions, Postgres};
 
 #[cfg(feature = "sqlite")]
 use sqlx::sqlite::{Sqlite, SqliteConnectOptions};
@@ -23,41 +23,33 @@ use sqlx::sqlite::{Sqlite, SqliteConnectOptions};
 #[derive(Debug, Clone)]
 pub(crate) enum ConnectionOptions {
     #[cfg(feature = "mysql")]
-    MySql(MySqlConnectOptions),
+    MySql(Url),
 
     #[cfg(feature = "postgres")]
-    Postgres(PgConnectOptions),
+    Postgres(Url),
 
     #[cfg(feature = "sqlite")]
-    Sqlite(SqliteConnectOptions),
+    Sqlite(Url),
 }
 
 impl ConnectionOptions {
-    pub(crate) fn from_url(url: &str) -> Result<Self, SqlxError> {
+    pub(crate) fn from_url(url: &str) -> Result<Self, ParseError> {
         #[cfg(feature = "mysql")]
         if url.starts_with("mysql://") {
-            return Ok(ConnectionOptions::MySql(MySqlConnectOptions::from_str(
-                url,
-            )?));
+            return Ok(ConnectionOptions::MySql(Url::parse(url)?));
         }
 
         #[cfg(feature = "postgres")]
         if url.starts_with("postgres://") {
-            return Ok(ConnectionOptions::Postgres(
-                PgConnectOptions::from_str(url)?,
-            ));
+            return Ok(ConnectionOptions::Postgres(Url::parse(url)?));
         }
 
         #[cfg(feature = "sqlite")]
         if url.starts_with("sqlite://") {
-            return Ok(ConnectionOptions::Sqlite(
-                SqliteConnectOptions::from_str(url)?,
-            ));
+            return Ok(ConnectionOptions::Sqlite(Url::parse(url)?));
         }
 
-        Err(SqlxError::Configuration(
-            format!("Invalid connection {}", url).into(),
-        ))
+        Err(ParseError::EmptyHost)
     }
 }
 
@@ -72,7 +64,7 @@ pub struct Options {
 }
 
 impl Options {
-    pub fn from_url(url: &str) -> Result<Self, SqlxError> {
+    pub fn from_url(url: &str) -> Result<Self, ParseError> {
         let connect_options = ConnectionOptions::from_url(url)?;
         Ok(Self {
             connect_options,
@@ -111,71 +103,95 @@ impl Options {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum DataBase {
+pub(crate) enum DataBaseType {
     #[cfg(feature = "mysql")]
-    MySql(Pool<MySql>),
+    MySql,
 
     #[cfg(feature = "postgres")]
-    Postgres(Pool<Postgres>),
+    Postgres,
 
     #[cfg(feature = "sqlite")]
-    Sqlite(Pool<Sqlite>),
+    Sqlite,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DataBase {
+    database_type: DataBaseType,
+    backend: Pool<Any>,
 }
 
 impl DataBase {
     pub(crate) fn connect(options: &Options) -> Result<Self, SqlxError> {
-        match options.connect_options {
-            #[cfg(feature = "mysql")]
-            ConnectionOptions::MySql(ref mysql_options) => {
-                let mut pool_options = PoolOptions::<MySql>::new();
-                let pool = pool_options
-                    .max_connections(options.max_connections)
-                    .min_connections(options.min_connections)
-                    .acquire_timeout(options.acquire_timeout)
-                    .acquire_slow_level(options.acquire_slow_level)
-                    .acquire_slow_threshold(options.acquire_slow_threshold)
-                    .after_connect(|connection, meta| Box::pin(async move {
-                        event!(Level::INFO, "MySql after connect");
+        install_default_drivers();
+        let pool_option: PoolOptions<Any> = PoolOptions::new()
+            .max_connections(options.max_connections)
+            .min_connections(options.min_connections)
+            .acquire_slow_level(options.acquire_slow_level)
+            .acquire_slow_threshold(options.acquire_slow_threshold)
+            .acquire_timeout(options.acquire_timeout);
 
-                        Ok(())
-                    }))
-                    .connect_lazy_with(mysql_options.clone());
-                Ok(DataBase::MySql(pool))
+        let (any_option, database_type) = match options.connect_options {
+            #[cfg(feature = "mysql")]
+            ConnectionOptions::MySql(ref url) => {
+                (AnyConnectOptions::from_url(url)?, DataBaseType::MySql)
             }
             #[cfg(feature = "postgres")]
-            ConnectionOptions::Postgres(ref postgres_options) => {
-                let mut pool_options = PoolOptions::<Postgres>::new();
-                let pool = pool_options
-                    .max_connections(options.max_connections)
-                    .min_connections(options.min_connections)
-                    .acquire_timeout(options.acquire_timeout)
-                    .acquire_slow_level(options.acquire_slow_level)
-                    .acquire_slow_threshold(options.acquire_slow_threshold)
-                    .after_connect(|connection, meta| Box::pin(async move {
-                        event!(Level::INFO, "Postgres after connect");
-
-                        Ok(())
-                    }))
-                    .connect_lazy_with(postgres_options.clone());
-                Ok(DataBase::Postgres(pool))
+            ConnectionOptions::Postgres(ref url) => {
+                (AnyConnectOptions::from_url(url)?, DataBaseType::Postgres)
             }
             #[cfg(feature = "sqlite")]
-            ConnectionOptions::Sqlite(ref sqlite_options) => {
-                let mut pool_options = PoolOptions::<Sqlite>::new();
-                let pool = pool_options
-                    .max_connections(options.max_connections)
-                    .min_connections(options.min_connections)
-                    .acquire_timeout(options.acquire_timeout)
-                    .acquire_slow_level(options.acquire_slow_level)
-                    .acquire_slow_threshold(options.acquire_slow_threshold)
-                    .after_connect(|connection, meta| Box::pin(async move {
-                        event!(Level::INFO, "Sqlite after connect");
-
-                        Ok(())
-                    }))
-                    .connect_lazy_with(sqlite_options.clone());
-                Ok(DataBase::Sqlite(pool))
+            ConnectionOptions::Sqlite(ref url) => {
+                (AnyConnectOptions::from_url(url)?, DataBaseType::Sqlite)
             }
+        };
+
+        let pool = pool_option.connect_lazy_with(any_option);
+        Ok(Self {
+            backend: pool,
+            database_type,
+        })
+    }
+
+    pub(crate) async fn get_status(&self) -> Result<Status, SqlxError> {
+        match self.database_type {
+            #[cfg(feature = "mysql")]
+            DataBaseType::MySql => {
+                let result = query("show master status")
+                    .fetch_optional(&self.backend)
+                    .await?;
+                if result.is_none() {
+                    Ok(Status::Slave)
+                } else {
+                    Ok(Status::Master)
+                }
+            }
+            #[cfg(feature = "postgres")]
+            DataBaseType::Postgres => {
+                let result = query("SELECT pg_is_in_recovery()")
+                    .fetch_optional(&self.backend)
+                    .await?;
+                if result.is_none() {
+                    Ok(Status::Master)
+                } else {
+                    Ok(Status::Slave)
+                }
+            }
+            #[cfg(feature = "sqlite")]
+            DataBaseType::Sqlite => Ok(Status::Master),
         }
+    }
+}
+
+impl Deref for DataBase {
+    type Target = Pool<Any>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.backend
+    }
+}
+
+impl DerefMut for DataBase {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.backend
     }
 }

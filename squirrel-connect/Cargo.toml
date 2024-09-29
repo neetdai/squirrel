@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 tracing = {version = "0.1.40", default-feature = false, features = ["async-await", "std", "attributes"]}
-sqlx = {version = "0.8.2", default-feature = false}
+sqlx = {version = "0.8.2", default-feature = false, features = []}
+url = {version = "2.5.2"}
 
 [dev-dependencies]
 tokio = {version = "1.40.0", default-feature = false, features = ["test-util", "macros"]}
